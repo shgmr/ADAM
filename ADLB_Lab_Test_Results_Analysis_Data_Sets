@@ -1,0 +1,127 @@
+# Load necessary libraries
+library(dplyr)
+library(lubridate)
+
+# Step 1: Merge SDTM.LB and ADAM.ADSL datasets
+ADLB1 <- merge(SDTM_LB, ADAM_ADSL %>% select(-STUDYID), by = "USUBJID")
+ADLB1 <- ADLB1 %>% filter(!is.na(LBDTC))
+
+# Step 2: Derive ADT, ATM, ADTM
+ADLB2 <- ADLB1 %>%
+  mutate(
+    ADT = ifelse(nchar(LBDTC) == 10, ymd(LBDTC), as.Date(NA)),
+    ATM = ifelse(nchar(LBDTC) == 10, NA, NA),
+    ADTM = ifelse(nchar(LBDTC) > 10, ymd_hms(LBDTC), NA),
+    ADY = ifelse(!is.na(ADT) & !is.na(TRTSDT), as.integer(ADT - TRTSDT + (ADT >= TRTSDT)), NA),
+    APHASE = case_when(
+      (ADT <= TRTSDT & is.na(ATM)) | (!is.na(ADT) & !is.na(ATM) & ADTM <= TRT01SDTM) ~ "Screening",
+      (ADT > TRTSDT & is.na(ATM)) | (!is.na(ADT) & !is.na(ATM) & ADTM > TRT01SDTM) ~ "Treatment",
+      (ADT > TRTEDT & is.na(ATM)) | (!is.na(ADT) & !is.na(ATM) & ADTM > TRT01EDTM) ~ "Follow-Up",
+      TRUE ~ NA_character_
+    ),
+    EMDESC = case_when(
+      APHASE == "Screening" ~ "P",
+      APHASE == "Treatment" ~ "T",
+      APHASE == "Follow-Up" ~ "A",
+      TRUE ~ NA_character_
+    ),
+    PARAM = paste0(LBTEST, " (", LBORRESU, ")"),
+    PARAMCD = LBTESTCD
+  )
+
+# Step 3: Derive AVAL, AVALC, DTYPE
+ADLB2 <- ADLB2 %>%
+  mutate(
+    AVAL = ifelse(!is.na(LBSTRESN), LBSTRESN, ifelse(str_detect(LBSTRESC, "<") | str_detect(LBSTRESC, "<="), as.numeric(str_remove(LBSTRESC, "[<=>]")), NA)),
+    DTYPE = ifelse(!is.na(LBSTRESN), "", ifelse(str_detect(LBSTRESC, "<") | str_detect(LBSTRESC, "<=") | str_detect(LBSTRESC, ">") | str_detect(LBSTRESC, ">="), "IMPUTE", NA)),
+    AVALC = LBSTRESC,
+    TRTP = TRT01P,
+    TRTA = TRT01A
+  )
+
+# Step 4: Derive ABLFL
+ADLB2 <- ADLB2 %>%
+  mutate(NUMBER = row_number())
+
+# Step 5: Sort by necessary columns
+ADLB2_sorted <- ADLB2 %>%
+  arrange(USUBJID, PARAMCD, ADT, ADTM)
+
+# Step 6: Filter BASE dataset
+BASE <- ADLB2_sorted %>%
+  filter(EMDESC == "P" & (AVAL != NA | AVALC != '') & (ADT <= TRTSDT))
+
+# Step 7: Derive ABLFL as "Y" for the last record in PARAMCD
+ABLFL <- BASE %>%
+  group_by(USUBJID, PARAMCD) %>%
+  mutate(ABLFL = ifelse(row_number() == n(), "Y", NA)) %>%
+  ungroup()
+
+# Step 8: Left Join ADLB2 with ABLFL
+ADLB3 <- left_join(ADLB2_sorted, ABLFL, by = "NUMBER")
+
+# Step 9: Derive BASE by joining ADLB3 with itself where ABLFL is "Y"
+ADLB4 <- ADLB3 %>%
+  left_join(
+    filter(ADLB3, ABLFL == "Y") %>%
+      select(USUBJID, PARAMCD, AVAL) %>%
+      rename(BASE = AVAL),
+    by = c("USUBJID", "PARAMCD")
+  )
+
+# Step 10: Derive CHG
+ADLB5 <- ADLB4 %>%
+  mutate(
+    CHG = ifelse(!is.na(AVAL) & !is.na(BASE) & ABLFL != "Y", AVAL - BASE, NA),
+    CHG = ifelse(EMDESC == "P" & ABLFL != "Y", NA, CHG)
+  )
+
+# Step 11: Derive AVISIT and AVISITN
+ADLB6 <- ADLB5 %>%
+  mutate(
+    AVISIT = case_when(
+      ABLFL == "Y" ~ "Baseline",
+      str_detect(VISIT, "FOLLOW-UP") ~ "Follow-up",
+      TRUE ~ str_trim(VISIT)
+    ),
+    AVISITN = case_when(
+      AVISIT == "Baseline" ~ 0,
+      AVISIT == "Follow-up" ~ 100,
+      TRUE ~ as.integer(str_remove_all(AVISIT, "[^0-9]"))
+    )
+  )
+
+# Step 12: Sort by relevant columns
+ADLB6_sorted <- ADLB6 %>%
+  arrange(USUBJID, PARAMCD, ADT, ATM, DTYPE, LBSEQ)
+
+# Step 13: Derive ASEQ
+Final <- ADLB6_sorted %>%
+  group_by(USUBJID) %>%
+  mutate(ASEQ = row_number()) %>%
+  ungroup()
+
+# Step 14: Prepare final dataset for output
+ADLB_final <- Final %>%
+  select(
+    STUDYID, USUBJID, SUBJID, LBSEQ, ASEQ, TRTP, TRTA, ADT, ATM, ADTM, ADY, AVISIT, AVISITN, APHASE,
+    PARAM, PARAMCD, AVAL, AVALC, ABLFL, BASE, CHG, DTYPE, EMDESC, LBORRES, LBORRESU, LBORNRLO, LBSTNRHI,
+    LBSTNRLO, LBSTNRHI, LBSTRESC, VISIT, VISITNUM, LBDTC
+  )
+
+# Step 15: Label variables for ADLB dataset (optional in R, but can be done via attributes or metadata)
+attr(ADLB_final, "label") <- list(
+  STUDYID = "Study Identifier", USUBJID = "Unique Subject Identifier", SUBJID = "Subject Identifier for the Study",
+  LBSEQ = "Sequence Number", ASEQ = "Analysis Sequence Number", TRTP = "Planned Treatment", TRTA = "Actual Treatment",
+  ADT = "Analysis Date", ATM = "Analysis Time", ADTM = "Analysis Date and Time", ADY = "Analysis Relative Day",
+  AVISIT = "Analysis Visit", AVISITN = "Analysis Visit (N)", APHASE = "PHASE", PARAM = "Parameter", PARAMCD = "Parameter Code",
+  AVAL = "Analysis Value", AVALC = "Analysis Value (C)", ABLFL = "Baseline Record Flag", BASE = "Baseline Value",
+  CHG = "Change from Baseline", DTYPE = "Derivation Type", EMDESC = "Description of Treatment Emergent",
+  LBORRES = "Result of Finding in Original Units", LBORRESU = "Original Units", LBORNRLO = "Reference Range Lower Limit in Orig Unit",
+  LBORNRHI = "Reference Range Higher Limit in Orig Unit", LBSTNRLO = "Reference Range Lower Limit-Std Units",
+  LBSTNRHI = "Reference Range Upper Limit-Std Units", LBSTRESC = "Character Result/ Finding in Std Format",
+  VISIT = "Visit Name", VISITNUM = "Visit Number", LBDTC = "Date/Time of Lab"
+)
+
+# Save to a file (optional)
+write.csv(ADLB_final, "ADLB_final.csv", row.names = FALSE)
