@@ -1,0 +1,175 @@
+# Load necessary libraries
+library(dplyr)
+library(tidyr)
+
+# Merge SDTM.EG and ADAM.ADSL
+ADEG1 <- merge(SDTM.EG, ADAM.ADSL, by = "USUBJID", all.x = TRUE)
+
+# Derive PARAM
+ADEG2 <- ADEG1 %>%
+  distinct(EGTEST, EGORRESU) %>%
+  filter(EGORRESU != "")
+
+ADEG3 <- ADEG2 %>%
+  mutate(PARAM = paste0(EGTEST, " (", EGORRESU, ")")) %>%
+  select(EGTEST, PARAM)
+
+# Left Join PARAM from ADEG1 with ADEG3 when EGTEST is the same
+ADEG4 <- left_join(ADEG1, ADEG3, by = "EGTEST")
+
+# Map USUBJID, EGTESTCD, and count of USUBJID from ADEG4 to ADEG5
+ADEG5 <- ADEG4 %>%
+  group_by(USUBJID, EGTESTCD) %>%
+  summarise(count = n(), .groups = "drop")
+
+# Left Join ADEG4 with ADEG5 when USUBJID and EGTESTCD are the same
+ADEG6 <- left_join(ADEG4, ADEG5, by = c("USUBJID", "EGTESTCD"))
+
+# Derive DTYPE
+ADEG7 <- ADEG6 %>%
+  filter(EGTESTCD != "INTP") %>%
+  group_by(USUBJID, EGTESTCD) %>%
+  mutate(
+    EGSTRESN = as.numeric(EGSTRESC),
+    SUM = cumsum(EGSTRESN),
+    N = row_number(),
+    DTYPE = ifelse(last(EGTESTCD), "AVERAGE", NA)
+  ) %>%
+  ungroup()
+
+# Derive EGSTRESN and EGSTRESC
+ADEG8 <- ADEG7 %>%
+  mutate(
+    EGSTRESN_MEAN = ifelse(DTYPE == "AVERAGE", SUM / N, NA),
+    EGSTRESC = ifelse(DTYPE == "AVERAGE", as.character(EGSTRESN_MEAN), EGSTRESC)
+  )
+
+# Combine ADEG8 with ADEG6 where EGTESTCD = "INTP"
+ADEG9 <- bind_rows(ADEG8, filter(ADEG6, EGTESTCD == "INTP"))
+
+# Sort by USUBJID, EGTESTCD, EGDTC
+ADEG9 <- ADEG9 %>%
+  arrange(USUBJID, EGTESTCD, EGDTC)
+
+# Derive ADT, ATM, ADTM
+ADEG10 <- ADEG9 %>%
+  mutate(
+    ADT = ifelse(nchar(EGDTC) == 10, as.Date(EGDTC, format = "%Y-%m-%d"), NA),
+    ATM = ifelse(nchar(EGDTC) > 10, as.POSIXct(EGDTC, format = "%Y-%m-%dT%H:%M:%S"), NA),
+    ADTM = ifelse(nchar(EGDTC) > 10, ATM, NA),
+    ADY = ifelse(!is.na(ADT) & !is.na(TRTSDT), as.numeric(ADT - TRTSDT) + (ADT >= TRTSDT), NA)
+  )
+
+# Derive APHASE, EMDESC
+ADEG10 <- ADEG10 %>%
+  mutate(
+    APHASE = case_when(
+      (ADT <= TRTSDT & is.na(ATM)) | (!is.na(ADT) & !is.na(ATM) & ADTM <= TRT01SDTM) ~ "Screening",
+      (ADT > TRTSDT & is.na(ATM)) | (!is.na(ADT) & !is.na(ATM) & ADTM > TRT01SDTM) ~ "Treatment",
+      (ADT > TRTEDT & is.na(ATM)) | (!is.na(ADT) & !is.na(ATM) & ADTM > TRT01EDTM) ~ "Follow-Up"
+    ),
+    EMDESC = case_when(
+      (ADT <= TRTSDT & is.na(ATM)) | (!is.na(ADT) & !is.na(ATM) & ADTM <= TRT01SDTM) ~ "P",
+      (ADT > TRTSDT & is.na(ATM)) | (!is.na(ADT) & !is.na(ATM) & ADTM > TRT01SDTM) ~ "T",
+      (ADT > TRTEDT & is.na(ATM)) | (!is.na(ADT) & !is.na(ATM) & ADTM > TRT01EDTM) ~ "A"
+    )
+  )
+
+# Derive PARAMCD
+ADEG10 <- ADEG10 %>%
+  mutate(
+    PARAM = ifelse(EGTEST == 'Interpretation', EGTEST, PARAM),
+    PARAMCD = EGTESTCD
+  )
+
+# Derive AVAL and AVALC
+ADEG10 <- ADEG10 %>%
+  mutate(
+    AVAL = case_when(
+      PARAMCD != "INTP" & DTYPE == "AVERAGE" ~ EGSTRESN_MEAN,
+      PARAMCD != "INTP" & DTYPE == "" ~ EGSTRESN,
+      PARAMCD == "INTP" ~ NA_real_,
+      TRUE ~ AVAL
+    ),
+    AVALC = case_when(
+      PARAMCD == "INTP" ~ EGSTRESC,
+      PARAMCD != "INTP" ~ "",
+      TRUE ~ AVALC
+    ),
+    TRTP = TRT01P,
+    TRTA = TRT01A
+  )
+
+# Derive ABLFL
+ADEG10$NUMBER <- 1:nrow(ADEG10)
+
+# Sort ADEG10 by USUBJID, PARAMCD, ADT, ADTM, DTYPE
+ADEG10 <- ADEG10 %>%
+  arrange(USUBJID, PARAMCD, ADT, ADTM, DTYPE)
+
+# Filter for baseline flag condition
+BASE <- ADEG10 %>%
+  filter(
+    EMDESC == "P" & (AVAL != NA | AVALC != "") & (ADT <= TRTSDT) & (COUNT > 1)
+  )
+
+# Set ABLFL to "Y" for last PARAMCD
+ABLFL <- BASE %>%
+  group_by(USUBJID, PARAMCD) %>%
+  filter(last(PARAMCD)) %>%
+  mutate(ABLFL = "Y")
+
+# Left join ADEG10 with ABLFL
+ADEG11 <- left_join(ADEG10, ABLFL, by = "NUMBER")
+
+# Derive BASE
+ADEG12 <- ADEG11 %>%
+  left_join(
+    filter(ADEG11, ABLFL == "Y"),
+    by = c("USUBJID", "PARAMCD")
+  ) %>%
+  rename(BASE = AVAL)
+
+# Derive CHG
+ADEG13 <- ADEG12 %>%
+  mutate(
+    CHG = case_when(
+      !is.na(AVAL) & !is.na(BASE) & ABLFL != "Y" ~ AVAL - BASE,
+      ABLFL != "Y" & EMDESC == "P" ~ NA_real_,
+      TRUE ~ CHG
+    )
+  )
+
+# Derive AVISIT and AVISITN
+ADEG14 <- ADEG13 %>%
+  mutate(
+    AVISIT = case_when(
+      PARAMCD != "INTP" ~ case_when(
+        ABLFL == "Y" ~ "Baseline",
+        grepl("FOLLOW-UP", VISIT) ~ "Follow-up",
+        TRUE ~ VISIT
+      ),
+      TRUE ~ NA_character_
+    ),
+    AVISITN = case_when(
+      PARAMCD != "INTP" ~ case_when(
+        ABLFL == "Y" ~ 0,
+        grepl("FOLLOW-UP", VISIT) ~ 100,
+        TRUE ~ as.numeric(gsub("[^0-9]", "", VISIT))
+      ),
+      TRUE ~ NA_real_
+    )
+  )
+
+# Sort ADEG14
+ADEG14 <- ADEG14 %>%
+  arrange(USUBJID, PARAMCD, ADT, ATM, DTYPE, EGSEQ)
+
+# Derive ASEQ
+Final <- ADEG14 %>%
+  group_by(USUBJID, PARAMCD, ADT, ATM, DTYPE, EGSEQ) %>%
+  mutate(ASEQ = row_number()) %>%
+  ungroup()
+
+# Save the final dataset
+write.csv(Final, "Final.csv")
