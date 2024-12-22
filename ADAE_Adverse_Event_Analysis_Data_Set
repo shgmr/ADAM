@@ -1,0 +1,60 @@
+library(dplyr)
+library(lubridate)
+
+# Assume SDTM_AE and ADAM_ADSL are already loaded data frames
+
+# Merge SDTM.AE and ADAM.ADSL
+ADAE1 <- SDTM_AE %>%
+  left_join(ADAM_ADSL %>% select(-STUDYID), by = "USUBJID") %>%
+  filter(!is.na(USUBJID))
+
+# Derive ASTDT, AENDT, TRTEMFL, PREFL, FUPFL, EMDESC, ASTDTF
+ADAE1 <- ADAE1 %>%
+  mutate(
+    ASTDT = as.Date(substr(AESTDTC, 1, 10), format = "%Y-%m-%d"),
+    AENDT = as.Date(substr(AEENDTC, 1, 10), format = "%Y-%m-%d"),
+    TRTEMFL = case_when(
+      TRTSDT <= ASTDT & ASTDT <= TRTEDT ~ "Y",
+      TRUE ~ NA_character_
+    ),
+    PREFL = case_when(
+      !is.na(ASTDT) & ASTDT < TRTSDT ~ "Y",
+      TRUE ~ NA_character_
+    ),
+    FUPFL = case_when(
+      !is.na(ASTDT) & ASTDT > TRTEDT & !is.na(TRTEDT) ~ "Y",
+      TRUE ~ NA_character_
+    ),
+    EMDESC = case_when(
+      TRTSDT <= ASTDT & ASTDT <= TRTEDT ~ "T",
+      !is.na(ASTDT) & ASTDT < TRTSDT ~ "P",
+      !is.na(ASTDT) & ASTDT > TRTEDT ~ "A",
+      TRUE ~ NA_character_
+    ),
+    ASTDY = if_else(!is.na(ASTDT) & !is.na(TRTSDT), as.integer(difftime(ASTDT, TRTSDT, units = "days")) + (ASTDT >= TRTSDT), NA_integer_),
+    ASTDTF = case_when(
+      nchar(AESTDTC) >= 10 ~ "",
+      nchar(AESTDTC) == 7 ~ "D",
+      nchar(AESTDTC) == 4 ~ "M",
+      TRUE ~ NA_character_
+    ),
+    TRTA = TRT01A,
+    TRTP = TRT01P
+  )
+
+# Set up the ADAM.ADAE dataset with proper labels
+ADAE <- ADAE1 %>%
+  select(
+    STUDYID, USUBJID, AESEQ, AETERM, AELLT, AELLTCD, AEDECOD, AEPTCD,
+    ASTDT, ASTDTF, AEENDTC, AENDT, ASTDY, TRTEMFL, PREFL, FUPFL, EMDESC,
+    AEHLT, AEHLTCD, AEHLGT, AEHLGTCD, AEBODSYS, AESER, AEACN, AEREL, AEOUT,
+    AESCONG, AESDISAB, AESDTH
+  )
+
+# Optionally, assign attributes (e.g., labels) in R if needed using attr() function
+attr(ADAE$STUDYID, "label") <- "Study Identifier"
+attr(ADAE$USUBJID, "label") <- "Unique Subject Identifier"
+# Add labels for other columns as per requirements
+
+# View the final ADAE dataset
+head(ADAE)
