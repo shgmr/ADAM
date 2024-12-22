@@ -1,0 +1,87 @@
+library(dplyr)
+library(lubridate)
+
+# Assuming SDTM_CM and ADAM_ADSL are already loaded data frames
+
+# Merge SDTM.CM and ADAM.ADSL
+ADCM1 <- SDTM_CM %>%
+  left_join(ADAM_ADSL %>% select(-STUDYID), by = "USUBJID") %>%
+  filter(!is.na(USUBJID))
+
+# Derive ASTDT, AENDT, ONTRTFL, PREFL, FUPFL, EMDESC, ASTDY
+ADCM2 <- ADCM1 %>%
+  mutate(
+    ASTDT = as.Date(substr(CMSTDTC, 1, 10), format = "%Y-%m-%d"),
+    AENDT = as.Date(substr(CMENDTC, 1, 10), format = "%Y-%m-%d"),
+    
+    ONTRTFL = case_when(
+      TRTSDT <= ASTDT & ASTDT <= TRTEDT ~ "Y",
+      TRUE ~ NA_character_
+    ),
+    PREFL = case_when(
+      !is.na(ASTDT) & ASTDT < TRTSDT ~ "Y",
+      TRUE ~ NA_character_
+    ),
+    FUPFL = case_when(
+      !is.na(ASTDT) & ASTDT > TRTEDT & !is.na(TRTEDT) ~ "Y",
+      TRUE ~ NA_character_
+    ),
+    ASTDY = if_else(!is.na(ASTDT) & !is.na(TRTSDT), as.integer(difftime(ASTDT, TRTSDT, units = "days")) + (ASTDT >= TRTSDT), NA_integer_),
+    ASTDTF = case_when(
+      nchar(CMSTDTC) >= 10 ~ "",
+      nchar(CMSTDTC) == 7 ~ "D",
+      nchar(CMSTDTC) == 4 ~ "M",
+      TRUE ~ NA_character_
+    ),
+    ADURN = case_when(
+      !is.na(CMSTDTC) & !is.na(CMENDTC) ~ as.integer(difftime(AENDT, ASTDT, units = "days")) + 1,
+      TRUE ~ NA_integer_
+    ),
+    ADURU = case_when(
+      ADURN > 1 ~ "DAYS",
+      ADURN == 1 ~ "DAY",
+      TRUE ~ ""
+    ),
+    TRTA = TRT01A,
+    TRTP = TRT01P
+  )
+
+# Sort the data
+ADCM2 <- ADCM2 %>%
+  arrange(USUBJID, CMTRT, ASTDT, AENDT, CMDECOD, CMSEQ)
+
+# Derive ASEQ (Analysis Sequence Number)
+ADCM2 <- ADCM2 %>%
+  group_by(USUBJID) %>%
+  mutate(ASEQ = row_number()) %>%
+  ungroup()
+
+# Prepare the final dataset
+ADAE <- ADCM2 %>%
+  select(
+    STUDYID, USUBJID, CMSEQ, ASEQ, CMDECOD, ASTDT, ASTDTF, ONTRTFL, PREFL, FUPFL, AENDT, ASTDY,
+    CMTRT, CMINDC, CMROUTE, CMSTDTC, CMENDTC, CMENRTPT
+  )
+
+# Optionally, assign attributes (e.g., labels) in R if needed using attr() function
+attr(ADAE$STUDYID, "label") <- "Study Identifier"
+attr(ADAE$USUBJID, "label") <- "Unique Subject Identifier"
+attr(ADAE$CMSEQ, "label") <- "Sequence Number"
+attr(ADAE$ASEQ, "label") <- "Analysis Sequence Number"
+attr(ADAE$CMDECOD, "label") <- "Dictionary-Derived Term"
+attr(ADAE$ASTDT, "label") <- "Analysis Start Date"
+attr(ADAE$ASTDTF, "label") <- "Analysis Start Date Imputation Flag"
+attr(ADAE$ONTRTFL, "label") <- "On Treatment Record Flag"
+attr(ADAE$PREFL, "label") <- "Pre-treatment Flag"
+attr(ADAE$FUPFL, "label") <- "Follow-Up Flag"
+attr(ADAE$AENDT, "label") <- "Analysis End Date"
+attr(ADAE$ASTDY, "label") <- "Analysis Start Relative Day"
+attr(ADAE$CMTRT, "label") <- "Reported name of drug, Medication or Therapy"
+attr(ADAE$CMINDC, "label") <- "Indication"
+attr(ADAE$CMROUTE, "label") <- "Route of Administration"
+attr(ADAE$CMSTDTC, "label") <- "Start Date/Time of Medication"
+attr(ADAE$CMENDTC, "label") <- "End Date/Time of Medication"
+attr(ADAE$CMENRTPT, "label") <- "End Relative to Reference Time Point"
+
+# View the final dataset
+head(ADAE)
