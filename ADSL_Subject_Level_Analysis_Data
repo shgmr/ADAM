@@ -1,0 +1,73 @@
+# Load necessary libraries
+library(dplyr)
+library(lubridate)
+
+# Demographic Variables
+dm1 <- sdtm.dm %>%
+  mutate(
+    AETHNIC = ifelse(is.na(ETHNIC), "NOT COLLECTED", ETHNIC),
+    ARACE = case_when(
+      RACE == "WHITE" ~ "W",
+      RACE == "BLACK OR AFRICAN AMERICAN" ~ "B",
+      RACE == "NATIVE HAWAIIAN OR OTHER PACIFIC ISLANDERS" ~ "HP",
+      RACE == "ASIAN" ~ "A",
+      RACE == "AMERICAN INDIAN OR ALASKA AMERICAN" ~ "AA",
+      TRUE ~ NA_character_
+    ),
+    TRTSDT = as.Date(substr(RFSTDTC, 1, 10), format = "%Y-%m-%d"),
+    TRTSTM = hms::as_hms(substr(RFSTDTC, 12, 16)),
+    TRTEDT = as.Date(substr(RFENDTC, 1, 10), format = "%Y-%m-%d"),
+    TRTETM = hms::as_hms(substr(RFENDTC, 12, 16)),
+    TRT01P = ifelse(ARMCD == "DRUG A", "TRTA", NA_character_),
+    TRT01A = ifelse(ACTARMCD == "DRUG A", "TRTA", NA_character_),
+    SAFFL = ifelse(!is.na(RFSTDTC), "Y", "N"),
+    FASFL = ifelse(!is.na(RFSTDTC), "Y", "N")
+  )
+
+# Merge dm1 and sdtm.ds to get DSDECOD and DSSTDTC
+dm2 <- left_join(dm1, sdtm.ds %>% select(USUBJID, DSDECOD, DSSTDTC), by = "USUBJID") %>%
+  mutate(
+    EOSDT = as.Date(substr(DSSTDTC, 1, 10), format = "%Y-%m-%d"),
+    EOSSTT = ifelse(DSDECOD == "COMPLETED", "COMPLETED", "DISCONTINUED")
+  )
+
+# Sort and remove duplicates from sdtm.EX
+ex <- SDTM.EX %>%
+  distinct(USUBJID, EXSTDTC, EXENDTC, .keep_all = TRUE) %>%
+  arrange(USUBJID, EXSTDTC, EXENDTC)
+
+# Split the data into ex1 and ex2 based on USUBJID
+ex1 <- ex %>%
+  group_by(USUBJID) %>%
+  filter(row_number() == 1) %>%
+  ungroup()
+
+ex2 <- ex %>%
+  group_by(USUBJID) %>%
+  filter(row_number() == n()) %>%
+  ungroup()
+
+# Merge dm3 with ex1 and ex2
+dm4 <- left_join(dm2, ex1 %>% select(USUBJID, EXSTDTC), by = "USUBJID")
+dm5 <- left_join(dm4, ex2 %>% select(USUBJID, EXENDTC), by = "USUBJID")
+
+# Final dataset processing
+Final <- dm5 %>%
+  mutate(
+    TRT01SDTM = as_datetime(EXSTDTC),
+    TRT01SDT = as.Date(substr(EXSTDTC, 1, 10), format = "%Y-%m-%d"),
+    TRT01EDTM = as_datetime(EXENDTC),
+    TRT01EDT = as.Date(substr(EXENDTC, 1, 10), format = "%Y-%m-%d")
+  )
+
+# Create ADAM.ADSL dataset with specified labels and lengths
+ADSL <- Final %>%
+  select(
+    STUDYID, USUBJID, SUBJID, SITEID, BRTHDTC, AGE, AGEU, SEX, RACE, ARACE,
+    ETHNIC, AETHNIC, SAFFL, FASFL, ARM, ARMCD, ACTARMCD, ACTARM, TRT01P, TRT01A,
+    RFSTDTC, RFENDTC, TRTSDT, TRTSTM, TRT01SDTM, TRT01SDT, TRTEDT, TRTETM,
+    TRT01EDTM, TRT01EDT, EOSSTT, EOSDT, COUNTRY
+  )
+
+# Save the data to ADAM.ADSL (assuming you want to write to disk)
+write.csv(ADSL, "E://users/tiany/ADSL.csv", row.names = FALSE)
